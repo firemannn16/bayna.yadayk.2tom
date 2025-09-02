@@ -19,6 +19,13 @@
     .small { font-size:0.9rem; color:#444; margin-top:6px; }
     .hidden { display:none; }
     h3 { margin-bottom:6px; margin-top:16px; }
+
+    /* modal */
+    .overlay { position:fixed; left:0; top:0; right:0; bottom:0; background:rgba(0,0,0,0.4); display:flex; align-items:center; justify-content:center; z-index:1000; }
+    .modal { background:white; padding:20px; border-radius:8px; max-width:500px; width:90%; box-shadow:0 6px 20px rgba(0,0,0,0.2); }
+    .modal h2 { margin-top:0; }
+    .modal .correct { direction: rtl; font-size:1.4em; font-weight:600; margin:10px 0; }
+    .modal .controls { display:flex; gap:8px; justify-content:flex-end; margin-top:12px; }
   </style>
 </head>
 <body>
@@ -56,6 +63,9 @@
     </div>
   </div>
 
+  <!-- Modal placeholder -->
+  <div id="modal-root"></div>
+
 <script>
   // words.txt должен быть в корне репозитория
   let words = []; // { rawLine, ruVariants:[], arFull }
@@ -64,6 +74,7 @@
   let correctLines = [];
   let order = [];
   let mode = 'all'; // 'all' или 'mistakes'
+  let modalTimeout = null;
 
   async function loadWords() {
     try {
@@ -141,6 +152,52 @@
     return s.trim().toLowerCase().replace(/ё/g, 'е');
   }
 
+  function showWrongModal(correctText, afterCloseCallback) {
+    // build modal
+    closeModal();
+    const root = document.getElementById('modal-root');
+    const overlay = document.createElement('div'); overlay.className = 'overlay';
+    const modal = document.createElement('div'); modal.className = 'modal';
+    modal.innerHTML = `
+      <h2>Неправильно</h2>
+      <div>Правильный ответ:</div>
+      <div class="correct">${escapeHtml(correctText)}</div>
+      <div class="controls">
+        <button id="modalClose">Закрыть (Esc)</button>
+      </div>
+    `;
+    overlay.appendChild(modal);
+    root.appendChild(overlay);
+
+    function cleanup() {
+      if (modalTimeout) { clearTimeout(modalTimeout); modalTimeout = null; }
+      document.removeEventListener('keydown', onKey);
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+    }
+
+    function onKey(e) {
+      if (e.key === 'Escape') {
+        cleanup();
+        if (typeof afterCloseCallback === 'function') afterCloseCallback();
+      }
+    }
+
+    document.getElementById('modalClose').addEventListener('click', () => { cleanup(); if (typeof afterCloseCallback === 'function') afterCloseCallback(); });
+    document.addEventListener('keydown', onKey);
+
+    // автозакрытие через 17 секунд
+    modalTimeout = setTimeout(() => {
+      cleanup();
+      if (typeof afterCloseCallback === 'function') afterCloseCallback();
+    }, 17000);
+  }
+
+  function closeModal() {
+    const root = document.getElementById('modal-root');
+    root.innerHTML = '';
+    if (modalTimeout) { clearTimeout(modalTimeout); modalTimeout = null; }
+  }
+
   function checkAnswer() {
     if (currentIndex === null) return;
     const inputRaw = document.getElementById('userInput').value;
@@ -151,15 +208,15 @@
     if (ok) {
       correctLines.push(w.rawLine);
       document.getElementById('correct-list').value = correctLines.join('\n');
+      currentIndex = null;
+      if (order.length === 0) finishSession(); else nextWord();
     } else {
+      // добавляем ошибку и показываем модал с правильным ответом
       mistakes.push(w.rawLine);
       document.getElementById('mistake-list').value = mistakes.join('\n');
-    }
-    currentIndex = null;
-    if (order.length === 0) {
-      finishSession();
-    } else {
-      nextWord();
+      // show modal, after close - go to next word
+      const correctText = w.rawLine; // show whole raw line as correct format
+      showWrongModal(correctText, () => { currentIndex = null; if (order.length === 0) finishSession(); else nextWord(); });
     }
   }
 
@@ -219,6 +276,8 @@
   });
 
   loadWords();
+
+  function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]); }
 </script>
 </body>
 </html>
