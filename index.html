@@ -76,6 +76,57 @@
   let mode = 'all'; // 'all' или 'mistakes'
   let modalTimeout = null;
 
+  const STORAGE_KEY = 'arabicTrainerState_v1';
+
+  // ----------------- Persistence (localStorage) -----------------
+  function saveState() {
+    try {
+      const state = {
+        ts: Date.now(),
+        order, // remaining queue
+        currentIndex,
+        mistakes,
+        correctLines,
+        mode,
+        wordsCount: words.length,
+        wordsPreview: words.slice(0,3).map(w => w.rawLine)
+      };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      //console.log('saved state');
+    } catch (e) { console.warn('saveState failed', e); }
+  }
+
+  function loadState() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return false;
+      const s = JSON.parse(raw);
+      if (!s || typeof s.wordsCount === 'undefined') return false;
+      // quick check: same number of words
+      if (s.wordsCount !== words.length) return false;
+      // check preview to avoid mismatch if user edited words.txt
+      if (Array.isArray(s.wordsPreview)) {
+        for (let i=0;i<s.wordsPreview.length;i++){
+          if (s.wordsPreview[i] !== (words[i] ? words[i].rawLine : undefined)) return false;
+        }
+      }
+      // restore
+      order = Array.isArray(s.order) ? s.order.slice() : [];
+      currentIndex = typeof s.currentIndex !== 'undefined' ? s.currentIndex : null;
+      mistakes = Array.isArray(s.mistakes) ? s.mistakes.slice() : [];
+      correctLines = Array.isArray(s.correctLines) ? s.correctLines.slice() : [];
+      mode = s.mode || 'all';
+
+      // update UI with restored lists
+      document.getElementById('mistake-list').value = mistakes.join('\n');
+      document.getElementById('correct-list').value = correctLines.join('\n');
+      return true;
+    } catch (e) { console.warn('loadState failed', e); return false; }
+  }
+
+  function clearSavedState() { localStorage.removeItem(STORAGE_KEY); }
+  // ---------------------------------------------------------------
+
   async function loadWords() {
     try {
       const res = await fetch('words.txt');
@@ -93,8 +144,21 @@
         return { rawLine: line, ruVariants, arFull: ar };
       });
       document.getElementById('doneDua').disabled = false;
-      if (words.length) prepareOrder();
-      else document.getElementById('arabicWord').textContent = 'Словарь пуст.';
+
+      // try restore previous session
+      const restored = loadState();
+      if (!restored) {
+        prepareOrder();
+      } else {
+        // if restored, immediately open trainer and show the current word
+        document.getElementById('intro').classList.add('hidden');
+        document.getElementById('main').classList.remove('hidden');
+        if (currentIndex !== null && typeof words[currentIndex] !== 'undefined') {
+          displayCurrent();
+        } else {
+          nextWord();
+        }
+      }
     } catch (err) {
       document.getElementById('doneDua').disabled = false;
       document.getElementById('arabicWord').textContent = 'Не удалось загрузить words.txt: ' + err;
@@ -111,10 +175,8 @@
   }
 
   function prepareOrder(source = 'all') {
-    order = [];
     if (source === 'all') {
-      const idxs = shuffleIndices(words.length);
-      order = idxs;
+      order = shuffleIndices(words.length);
       mode = 'all';
     } else if (source === 'mistakes') {
       const idxs = [];
@@ -125,6 +187,19 @@
       order = idxs;
       mode = 'mistakes';
     }
+    saveState(); // persist new order
+  }
+
+  function displayCurrent() {
+    if (currentIndex !== null && typeof words[currentIndex] !== 'undefined') {
+      const w = words[currentIndex];
+      document.getElementById('arabicWord').textContent = w.arFull || w.rawLine;
+      updateProgress();
+      document.getElementById('userInput').value = '';
+      document.getElementById('userInput').focus();
+    } else {
+      nextWord();
+    }
   }
 
   function nextWord() {
@@ -133,6 +208,7 @@
         document.getElementById('arabicWord').textContent = 'Ошибок нет.';
         return;
       }
+      // prepare depending on mode
       prepareOrder(mode === 'mistakes' ? 'mistakes' : 'all');
     }
     if (order.length === 0) {
@@ -146,6 +222,7 @@
     updateProgress();
     document.getElementById('userInput').value = '';
     document.getElementById('userInput').focus();
+    saveState();
   }
 
   function normalizeRu(s) {
@@ -153,7 +230,6 @@
   }
 
   function showWrongModal(correctText, afterCloseCallback) {
-    // build modal
     closeModal();
     const root = document.getElementById('modal-root');
     const overlay = document.createElement('div'); overlay.className = 'overlay';
@@ -174,29 +250,13 @@
       document.removeEventListener('keydown', onKey);
       if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
     }
-
-    function onKey(e) {
-      if (e.key === 'Escape') {
-        cleanup();
-        if (typeof afterCloseCallback === 'function') afterCloseCallback();
-      }
-    }
-
+    function onKey(e) { if (e.key === 'Escape') { cleanup(); if (typeof afterCloseCallback === 'function') afterCloseCallback(); } }
     document.getElementById('modalClose').addEventListener('click', () => { cleanup(); if (typeof afterCloseCallback === 'function') afterCloseCallback(); });
     document.addEventListener('keydown', onKey);
-
-    // автозакрытие через 17 секунд
-    modalTimeout = setTimeout(() => {
-      cleanup();
-      if (typeof afterCloseCallback === 'function') afterCloseCallback();
-    }, 17000);
+    modalTimeout = setTimeout(() => { cleanup(); if (typeof afterCloseCallback === 'function') afterCloseCallback(); }, 17000);
   }
 
-  function closeModal() {
-    const root = document.getElementById('modal-root');
-    root.innerHTML = '';
-    if (modalTimeout) { clearTimeout(modalTimeout); modalTimeout = null; }
-  }
+  function closeModal() { const root = document.getElementById('modal-root'); root.innerHTML = ''; if (modalTimeout) { clearTimeout(modalTimeout); modalTimeout = null; } }
 
   function checkAnswer() {
     if (currentIndex === null) return;
@@ -209,13 +269,13 @@
       correctLines.push(w.rawLine);
       document.getElementById('correct-list').value = correctLines.join('\n');
       currentIndex = null;
+      saveState();
       if (order.length === 0) finishSession(); else nextWord();
     } else {
-      // добавляем ошибку и показываем модал с правильным ответом
       mistakes.push(w.rawLine);
       document.getElementById('mistake-list').value = mistakes.join('\n');
-      // show modal, after close - go to next word
-      const correctText = w.rawLine; // show whole raw line as correct format
+      saveState();
+      const correctText = w.rawLine;
       showWrongModal(correctText, () => { currentIndex = null; if (order.length === 0) finishSession(); else nextWord(); });
     }
   }
@@ -226,10 +286,12 @@
     if (mistakes.length) btn.classList.remove('hidden');
     document.getElementById('arabicWord').textContent = `Готово! Пройдено ${ (mode==='all') ? words.length : mistakes.length }/${words.length} , ошибок: ${mistakes.length}`;
     currentIndex = null;
+    saveState();
   }
 
   function updateProgress() {
-    document.getElementById('progress').textContent = `${ (mode==='all') ? (words.length - order.length) : (words.length - order.length) }/${words.length} слов пройдено – ${mistakes.length} ошибок`;
+    const done = words.length - order.length;
+    document.getElementById('progress').textContent = `${done}/${words.length} слов пройдено – ${mistakes.length} ошибок`;
   }
 
   function copyTextToClipboard(text, msg) {
@@ -250,6 +312,7 @@
     document.getElementById('mistake-list').value = '';
     document.getElementById('startMistakesBtn').classList.add('hidden');
     updateProgress();
+    saveState();
   }
 
   document.getElementById('submitBtn').addEventListener('click', checkAnswer);
@@ -266,6 +329,7 @@
     document.getElementById('mistake-list').value = mistakes.join('\n');
     document.getElementById('startMistakesBtn').classList.add('hidden');
     mode = 'mistakes';
+    saveState();
     nextWord();
   });
 
@@ -274,6 +338,9 @@
     document.getElementById('main').classList.remove('hidden');
     if (words.length) nextWord();
   });
+
+  // autosave before tab closes
+  window.addEventListener('beforeunload', saveState);
 
   loadWords();
 
