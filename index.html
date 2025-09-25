@@ -35,7 +35,9 @@
     <p>Дуа:</p>
     <div id="dua">رَّبِّ زِدْنِى عِلْمًۭا</div>
     <p>Перевод: «Господь мой! Приумножь мои знания»</p>
-    <button id="doneDua" disabled>Я сделал дуа</button>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+      <button id="doneDua" disabled>Я сделал дуа</button>
+    </div>
   </div>
 
   <!-- Основной интерфейс -->
@@ -60,6 +62,8 @@
       <button id="copyMistakesBtn">Копировать ошибки</button>
       <button id="clearMistakesBtn">Очистить ошибки</button>
       <button id="startMistakesBtn" class="hidden">Работа над ошибками</button>
+      <!-- Перенёс сюда кнопку обновления словаря (сброс прогресса) -->
+      <button id="refreshDictBtn">Обновить словарь (сбросить прогресс)</button>
     </div>
   </div>
 
@@ -88,44 +92,96 @@
         mistakes,
         correctLines,
         mode,
-        wordsCount: words.length,
-        wordsPreview: words.slice(0,3).map(w => w.rawLine)
+        wordsList: words.map(w => w.rawLine) // full list for merge
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-      //console.log('saved state');
     } catch (e) { console.warn('saveState failed', e); }
   }
 
-  function loadState() {
+  function clearSavedState() { localStorage.removeItem(STORAGE_KEY); }
+
+  // load + merge: restores saved state and appends new words if any
+  function loadStateAndMerge() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (!raw) return false;
       const s = JSON.parse(raw);
-      if (!s || typeof s.wordsCount === 'undefined') return false;
-      // quick check: same number of words
-      if (s.wordsCount !== words.length) return false;
-      // check preview to avoid mismatch if user edited words.txt
-      if (Array.isArray(s.wordsPreview)) {
-        for (let i=0;i<s.wordsPreview.length;i++){
-          if (s.wordsPreview[i] !== (words[i] ? words[i].rawLine : undefined)) return false;
+      if (!s || !Array.isArray(s.wordsList)) return false;
+
+      const oldList = s.wordsList;
+      const newList = words.map(w => w.rawLine);
+
+      // exact match -> restore directly
+      if (oldList.length === newList.length && oldList.every((v,i) => v === newList[i])) {
+        order = Array.isArray(s.order) ? s.order.slice() : [];
+        currentIndex = typeof s.currentIndex !== 'undefined' ? s.currentIndex : null;
+        mistakes = Array.isArray(s.mistakes) ? s.mistakes.slice() : [];
+        correctLines = Array.isArray(s.correctLines) ? s.correctLines.slice() : [];
+        mode = s.mode || 'all';
+        document.getElementById('mistake-list').value = mistakes.join('\n');
+        document.getElementById('correct-list').value = correctLines.join('\n');
+        return true;
+      }
+
+      // Merge/append logic: map rawLine -> new index
+      const newIndexByRaw = new Map();
+      newList.forEach((raw, idx) => newIndexByRaw.set(raw, idx));
+
+      // keep only mistakes/corrects that still exist
+      mistakes = (Array.isArray(s.mistakes) ? s.mistakes.slice() : []).filter(r => newIndexByRaw.has(r));
+      correctLines = (Array.isArray(s.correctLines) ? s.correctLines.slice() : []).filter(r => newIndexByRaw.has(r));
+
+      // build new order: map old order entries to new indices, then append any unseen new indices
+      const seen = new Set();
+      const newOrder = [];
+
+      if (Array.isArray(s.order)) {
+        for (const oldIdx of s.order) {
+          const raw = oldList[oldIdx];
+          if (!raw) continue;
+          const newIdx = newIndexByRaw.get(raw);
+          if (typeof newIdx === 'number' && !seen.has(newIdx)) {
+            newOrder.push(newIdx);
+            seen.add(newIdx);
+          }
         }
       }
-      // restore
-      order = Array.isArray(s.order) ? s.order.slice() : [];
-      currentIndex = typeof s.currentIndex !== 'undefined' ? s.currentIndex : null;
-      mistakes = Array.isArray(s.mistakes) ? s.mistakes.slice() : [];
-      correctLines = Array.isArray(s.correctLines) ? s.correctLines.slice() : [];
-      mode = s.mode || 'all';
 
-      // update UI with restored lists
+      for (let i = 0; i < newList.length; i++) {
+        if (!seen.has(i)) { newOrder.push(i); seen.add(i); }
+      }
+
+      order = newOrder;
+
+      // remap currentIndex by raw
+      if (typeof s.currentIndex === 'number') {
+        const curRaw = oldList[s.currentIndex];
+        const mapped = newIndexByRaw.get(curRaw);
+        currentIndex = (typeof mapped === 'number') ? mapped : null;
+      } else {
+        currentIndex = null;
+      }
+
+      mode = s.mode || 'all';
       document.getElementById('mistake-list').value = mistakes.join('\n');
       document.getElementById('correct-list').value = correctLines.join('\n');
-      return true;
-    } catch (e) { console.warn('loadState failed', e); return false; }
-  }
 
-  function clearSavedState() { localStorage.removeItem(STORAGE_KEY); }
+      // persist merged state
+      saveState();
+      return true;
+    } catch (e) { console.warn('loadStateAndMerge failed', e); return false; }
+  }
   // ---------------------------------------------------------------
+
+  // Detect reload navigation: if user pressed browser Refresh (F5), treat as force reload
+  function isPageReload() {
+    try {
+      const nav = performance.getEntriesByType && performance.getEntriesByType('navigation') && performance.getEntriesByType('navigation')[0];
+      if (nav && nav.type) return nav.type === 'reload';
+      if (performance.navigation) return performance.navigation.type === 1; // older browsers
+    } catch(e) {}
+    return false;
+  }
 
   async function loadWords() {
     try {
@@ -145,12 +201,21 @@
       });
       document.getElementById('doneDua').disabled = false;
 
-      // try restore previous session
-      const restored = loadState();
+      // If user reloaded the page (pressed Refresh), discard saved state and start fresh
+      if (isPageReload()) {
+        clearSavedState();
+        prepareOrder();
+        document.getElementById('intro').classList.remove('hidden');
+        document.getElementById('main').classList.add('hidden');
+        return;
+      }
+
+      // otherwise try to restore+merge previous session
+      const restored = loadStateAndMerge();
       if (!restored) {
         prepareOrder();
       } else {
-        // if restored, immediately open trainer and show the current word
+        // restored/merged — open trainer immediately
         document.getElementById('intro').classList.add('hidden');
         document.getElementById('main').classList.remove('hidden');
         if (currentIndex !== null && typeof words[currentIndex] !== 'undefined') {
@@ -331,6 +396,13 @@
     mode = 'mistakes';
     saveState();
     nextWord();
+  });
+
+  // manual "refresh dictionary" button: clear saved state and reload so new words.txt is used
+  document.getElementById('refreshDictBtn').addEventListener('click', () => {
+    if (!confirm('Сбросить текущую сессию и загрузить обновлённый словарь?\nЭто удалит текущее сохранение прогресса.')) return;
+    clearSavedState();
+    location.reload();
   });
 
   document.getElementById('doneDua').addEventListener('click', () => {
