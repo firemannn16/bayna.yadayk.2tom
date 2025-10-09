@@ -78,7 +78,10 @@
   let mode = 'all'; // 'all' или 'mistakes'
   let modalTimeout = null;
 
-  const STORAGE_KEY = 'arabicTrainerState_v1';
+  // unique app id for this site
+const APP_ID = 'trainer_one';
+const STORAGE_KEY = `arabicTrainerState_v1_${APP_ID}`;
+
 
   function parseLine(line) {
     const raw = line.trim();
