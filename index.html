@@ -12,7 +12,6 @@
   window.dataLayer = window.dataLayer || [];
   function gtag(){dataLayer.push(arguments);}
   gtag('js', new Date());
-
   gtag('config', 'G-EWNQ4J4668');
 </script>
 
@@ -191,6 +190,7 @@
     document.getElementById('arabicWord').textContent = `Готово! Пройдено ${done}/${total} слов – ошибок: ${mistakes.length}`;
     const btn = document.getElementById('startMistakesBtn');
     if (mistakes.length) btn.classList.remove('hidden'); else btn.classList.add('hidden');
+    // currentRaw логично оставить null при завершении — так UI в корректном состоянии
     currentRaw = null;
     saveState();
     updateProgress();
@@ -259,7 +259,7 @@
         if (!orderRaw || orderRaw.length === 0) finishSession(); else nextWord();
       });
     }
-    currentRaw = null;
+    // **Важно:** НЕ обнуляем currentRaw здесь — nextWord() уже установит новое значение.
   }
 
   // ====== Добавить новые слова (только новые) ======
