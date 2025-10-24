@@ -116,6 +116,22 @@
   function normalizeRu(s) { return String(s).trim().toLowerCase().replace(/ё/g, 'е'); }
   function escapeHtml(s) { return String(s).replace(/[&<>\"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'})[c]); }
 
+  // ====== Частичная ошибка: проверка последнего символа ======
+  function isLastCharMistake(inputRaw, targetRaw){
+    if(!inputRaw || !targetRaw) return false;
+    const input = normalizeRu(inputRaw);
+    const target = normalizeRu(targetRaw);
+    if(!input || !target) return false;
+    if(input === target) return false;
+    // user missing last char: input == target without last
+    if(input === target.slice(0, -1)) return true;
+    // user has same length but last char different: prefix equal
+    if(input.length === target.length && input.slice(0, -1) === target.slice(0, -1)) return true;
+    // user is shorter by one and matches prefix (e.g. typed up to last but omitted)
+    if(input.length === target.length - 1 && target.startsWith(input)) return true;
+    return false;
+  }
+
   // ====== Сохранение/восстановление состояния ======
   function saveState() {
     try {
@@ -202,21 +218,14 @@
     document.getElementById('progress').textContent = `${done}/${total} слов пройдено – ${mistakes.length} ошибок`;
   }
 
-  // ====== Модалка неправильного ответа ======
-  function showWrongModal(correctText, afterCloseCallback) {
+  // ====== Модалки ======
+  function showInfoModal(title, bodyHtml, afterCloseCallback, autoCloseMs = 5000) {
     closeModal();
     const root = document.getElementById('modal-root');
     const overlay = document.createElement('div'); overlay.className = 'overlay';
     const modal = document.createElement('div'); modal.className = 'modal';
     modal.setAttribute('role','dialog'); modal.setAttribute('aria-modal','true');
-    modal.innerHTML = `
-      <h2>Неправильно</h2>
-      <div>Правильный ответ:</div>
-      <div class="correct">${escapeHtml(correctText)}</div>
-      <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:12px;">
-        <button id="modalCloseBtn">Закрыть (Esc)</button>
-      </div>
-    `;
+    modal.innerHTML = `<h2>${escapeHtml(title)}</h2><div>${bodyHtml}</div><div style="display:flex; gap:8px; justify-content:flex-end; margin-top:12px;"><button id="modalCloseBtn">Закрыть (Esc)</button></div>`;
     overlay.appendChild(modal); root.appendChild(overlay);
 
     function cleanup() {
@@ -231,32 +240,66 @@
     document.addEventListener('keydown', onKey);
     const btn = document.getElementById('modalCloseBtn'); if (btn) btn.addEventListener('click', onBtn);
 
-    modalTimeout = setTimeout(() => { cleanup(); if (typeof afterCloseCallback === 'function') afterCloseCallback(); }, 17000);
+    modalTimeout = setTimeout(() => { cleanup(); if (typeof afterCloseCallback === 'function') afterCloseCallback(); }, autoCloseMs);
   }
+
+  function showWrongModal(correctText, afterCloseCallback) {
+    showInfoModal('Неправильно', `<div>Правильный ответ:</div><div class="correct">${escapeHtml(correctText)}</div>`, afterCloseCallback, 17000);
+  }
+
+  function showPartialModal(correctText, afterCloseCallback) {
+    showInfoModal('Почти правильно — засчитано как верный ответ', `<div>Полный правильный ответ:</div><div class="correct">${escapeHtml(correctText)}</div>`, afterCloseCallback, 5000);
+  }
+
   function closeModal() { const root = document.getElementById('modal-root'); root.innerHTML = ''; if (modalTimeout) { clearTimeout(modalTimeout); modalTimeout = null; } }
 
-  // ====== Проверка ответа (и запись в правильные/ошибки) ======
+  // ====== Проверка ответа (и запись в правильные/ошибки), с поддержкой частичной ошибки ======
   function checkAnswer() {
     if (!currentRaw) return;
     const inputRaw = document.getElementById('userInput').value;
     const input = normalizeRu(inputRaw);
     if (!input) return;
     const wObj = words.find(w => w.rawLine === currentRaw) || { ruVariants: [] };
-    const ok = (wObj.ruVariants || []).some(v => normalizeRu(v) === input || normalizeRu(v) === input.replace(/е/g,'ё'));
-    if (ok) {
-      correctLines.push(wObj.rawLine);
+
+    // точное совпадение (с учётом ё/е)
+    const exactOk = (wObj.ruVariants || []).some(v => normalizeRu(v) === input || normalizeRu(v) === input.replace(/е/g,'ё'));
+
+    if (exactOk) {
+      // обычный правильный ответ
+      if (!correctLines.includes(wObj.rawLine)) correctLines.push(wObj.rawLine);
       document.getElementById('correct-list').value = correctLines.join('\n');
       saveState();
+      currentRaw = null;
       if (!orderRaw || orderRaw.length === 0) finishSession(); else nextWord();
-    } else {
-      mistakes.push(currentRaw);
-      document.getElementById('mistake-list').value = mistakes.join('\n');
+      return;
+    }
+
+    // проверка частичной ошибки по последнему символу (напр.: ошибка в последней букве или пропущена последняя буква)
+    const partialOk = (wObj.ruVariants || []).some(v => isLastCharMistake(input, v));
+
+    if (partialOk) {
+      // засчитываем как правильный, но показываем модалку с полным ответом
+      if (!correctLines.includes(wObj.rawLine)) correctLines.push(wObj.rawLine);
+      document.getElementById('correct-list').value = correctLines.join('\n');
       saveState();
+      // покажем модалку и после её закрытия перейдём к следующему слову
       const correctText = wObj.rawLine || currentRaw;
-      showWrongModal(correctText, () => {
+      showPartialModal(correctText, () => {
+        currentRaw = null;
         if (!orderRaw || orderRaw.length === 0) finishSession(); else nextWord();
       });
+      return;
     }
+
+    // полностью неверно
+    if (!mistakes.includes(currentRaw)) mistakes.push(currentRaw);
+    document.getElementById('mistake-list').value = mistakes.join('\n');
+    saveState();
+    const correctText = wObj.rawLine || currentRaw;
+    showWrongModal(correctText, () => {
+      currentRaw = null;
+      if (!orderRaw || orderRaw.length === 0) finishSession(); else nextWord();
+    });
   }
 
   // ====== Добавить новые слова (вставка в случайные позиции) ======
@@ -272,7 +315,6 @@
       const newObjs = newly.map(l => parseLine(l));
       // добавляем объекты в словарь
       for (const obj of newObjs) words.push(obj);
-
       // Вставляем каждое новое слово в случайную позицию очереди (orderRaw)
       for (const raw of newly) {
         if (!orderRaw.includes(raw) && currentRaw !== raw) {
@@ -280,7 +322,6 @@
           orderRaw.splice(pos, 0, raw);
         }
       }
-
       saveState(); updateProgress();
       alert('Добавлено ' + newly.length + ' новых слов. Они будут заданы в случайных местах очереди.');
     } catch (err) {
@@ -320,16 +361,22 @@
       const serverLines = txt.split(/\r?\n/).map(s => s.trim()).filter(s => s);
       words = serverLines.map(l => parseLine(l));
 
-      // load saved state if exists, but DO NOT auto-append server new lines to orderRaw
+      // load saved state if exists, but DO NOT start session automatically — show intro first
       const saved = loadState();
       if (saved && Array.isArray(saved.orderRaw) && saved.orderRaw.length) {
         orderRaw = saved.orderRaw.filter(r => serverLines.includes(r));
+        const oldSnap = Array.isArray(saved.wordsList) ? saved.wordsList : [];
+        const newOnServer = serverLines.filter(r => !oldSnap.includes(r));
+        for (const r of newOnServer) {
+          if (!orderRaw.includes(r) && r !== saved.currentRaw) orderRaw.push(r);
+        }
         mistakes = Array.isArray(saved.mistakes) ? saved.mistakes.filter(r => serverLines.includes(r)) : [];
         correctLines = Array.isArray(saved.correctLines) ? saved.correctLines.filter(r => serverLines.includes(r)) : [];
         currentRaw = saved.currentRaw && serverLines.includes(saved.currentRaw) ? saved.currentRaw : null;
         mode = saved.mode || 'all';
         document.getElementById('mistake-list').value = mistakes.join('\n');
         document.getElementById('correct-list').value = correctLines.join('\n');
+        // show intro, let user click "Я сделал дуа" to resume
         document.getElementById('intro').classList.remove('hidden');
         document.getElementById('main').classList.add('hidden');
         updateProgress();
