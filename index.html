@@ -322,12 +322,12 @@
       // load saved state if exists, but DO NOT start session automatically — show intro first
       const saved = loadState();
       if (saved && Array.isArray(saved.orderRaw) && saved.orderRaw.length) {
+        // IMPORTANT CHANGE: do NOT append newOnServer into orderRaw.
+        // We restore the user's saved remaining queue filtered to current server lines,
+        // but we do NOT add newly added lines from the server automatically.
         orderRaw = saved.orderRaw.filter(r => serverLines.includes(r));
-        const oldSnap = Array.isArray(saved.wordsList) ? saved.wordsList : [];
-        const newOnServer = serverLines.filter(r => !oldSnap.includes(r));
-        for (const r of newOnServer) {
-          if (!orderRaw.includes(r) && r !== saved.currentRaw) orderRaw.push(r);
-        }
+        // (do not append newOnServer here)
+
         mistakes = Array.isArray(saved.mistakes) ? saved.mistakes.filter(r => serverLines.includes(r)) : [];
         correctLines = Array.isArray(saved.correctLines) ? saved.correctLines.filter(r => serverLines.includes(r)) : [];
         currentRaw = saved.currentRaw && serverLines.includes(saved.currentRaw) ? saved.currentRaw : null;
