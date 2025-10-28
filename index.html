@@ -107,6 +107,13 @@
   function normalizeRu(s) { return String(s||'').trim().toLowerCase().replace(/ё/g, 'е'); }
   function escapeHtml(s) { return String(s||'').replace(/[&<>\"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'})[c]); }
 
+  // ====== НОВАЯ ФУНКЦИЯ: Сравнение слов по содержимому ======
+  function getWordContentHash(wordObj) {
+    const ruContent = (wordObj.ruVariants || []).join('|');
+    const arContent = wordObj.arFull;
+    return `${ruContent}|||${arContent}`;
+  }
+
   // ====== Частичная ошибка: проверка последнего символа ======
   function isLastCharMistake(inputRaw, targetRaw){
     if(!inputRaw || !targetRaw) return false;
@@ -145,6 +152,26 @@
   }
 
   function clearSavedState() { localStorage.removeItem(STORAGE_KEY); }
+
+  // ====== robust fetch ======
+  async function robustFetchWords(){
+    const timestamp = Date.now();
+    const tries = ['words.txt','./words.txt'];
+    try{ tries.push(location.pathname.replace(/\/[^/]*$/,'/') + 'words.txt'); }catch(e){}
+    for(const p of tries){
+      try{ const r = await fetch(p + '?_' + timestamp, {cache: 'no-store'}); if(r.ok) return await r.text(); }catch(e){}
+    }
+    try{
+      const user = location.hostname.split('.')[0] || '';
+      const repo = (location.pathname.split('/').filter(Boolean)[0] || '');
+      if(user && repo){
+        const raw = `https://raw.githubusercontent.com/${user}/${repo}/main/words.txt`;
+        const r = await fetch(raw + '?_' + timestamp, {cache: 'no-store'});
+        if(r.ok) return await r.text();
+      }
+    }catch(e){}
+    throw new Error('Не удалось загрузить words.txt');
+  }
 
   // ====== Order / nextWord ======
   function prepareOrder(source='all') {
@@ -245,6 +272,61 @@
 
   function closeModal() { const root = document.getElementById('modal-root'); root.innerHTML = ''; if (modalTimeout) { clearTimeout(modalTimeout); modalTimeout = null; } }
 
+  // ====== НОВАЯ: Модал подтверждения сброса ======
+  function showResetModal() {
+    closeModal();
+    const overlay = document.createElement('div'); overlay.className = 'overlay';
+    const modal = document.createElement('div'); modal.className = 'modal';
+    modal.innerHTML = `
+      <div><strong>Подтверждение сброса</strong></div>
+      <div style="margin-top:12px">Вы уверены? Все выученные слова и прогресс будут потеряны. Это действие нельзя отменить.</div>
+      <div style="text-align:right;margin-top:16px">
+        <button id="modal-cancel" style="margin-right:8px">Отмена</button>
+        <button id="modal-confirm" style="background:#fff0f0;border-color:#f0b6b6">Да, сбросить</button>
+      </div>
+    `;
+    overlay.appendChild(modal);
+    document.getElementById('modal-root').appendChild(overlay);
+
+    function cleanup() {
+      document.removeEventListener('keydown', onKey);
+      overlay.removeEventListener('click', onOverlay);
+      const cancelBtn = document.getElementById('modal-cancel');
+      const confirmBtn = document.getElementById('modal-confirm');
+      if (cancelBtn) cancelBtn.removeEventListener('click', onCancel);
+      if (confirmBtn) confirmBtn.removeEventListener('click', onConfirm);
+      if(overlay.parentNode) overlay.parentNode.removeChild(overlay);
+    }
+    function onKey(e) { if (e.key === 'Escape') onCancel(); }
+    function onOverlay(e) { if (e.target === overlay) onCancel(); }
+    function onCancel() { cleanup(); }
+    async function onConfirm() {
+      cleanup();
+      // Выполнить сброс - загружаем все слова с сервера заново
+      clearSavedState();
+      try {
+        const txt = await robustFetchWords();
+        const serverLines = txt.split(/\r?\n/).map(s => s.trim()).filter(s => s);
+        words = serverLines.map(l => parseLine(l));
+        prepareOrder('all');
+        mistakes = []; correctLines = []; currentRaw = null; mode = 'all';
+        document.getElementById('correct-list').value = '';
+        document.getElementById('mistake-list').value = '';
+        document.getElementById('main').classList.add('hidden');
+        document.getElementById('intro').classList.remove('hidden');
+        saveState();
+        updateProgress();
+      } catch (err) {
+        alert('Не удалось загрузить words.txt: ' + err);
+      }
+    }
+
+    document.addEventListener('keydown', onKey);
+    overlay.addEventListener('click', onOverlay);
+    document.getElementById('modal-cancel').addEventListener('click', onCancel);
+    document.getElementById('modal-confirm').addEventListener('click', onConfirm);
+  }
+
   // ====== Проверка ответа (и запись) ======
   function checkAnswer() {
     if (!currentRaw) return;
@@ -289,9 +371,7 @@
   // ====== Добавить новые слова (только по кнопке) ======
   async function addNewWords() {
     try {
-      const res = await fetch('words.txt', { cache: 'no-store' });
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const txt = await res.text();
+      const txt = await robustFetchWords();
       const serverLines = txt.split(/\r?\n/).map(s => s.trim()).filter(s => s);
       const existing = new Set(words.map(w => w.rawLine));
       const newly = serverLines.filter(r => !existing.has(r));
@@ -312,18 +392,7 @@
   }
 
   // ====== Сброс прогресса (полный) ======
-  function resetProgress() {
-    if (!confirm('Вы уверены? Это сбросит локальный прогресс и начнёт словарь с нуля.')) return;
-    clearSavedState();
-    orderRaw = words.map(w => w.rawLine); shuffleArray(orderRaw);
-    mistakes = []; correctLines = []; currentRaw = null; mode = 'all';
-    document.getElementById('correct-list').value = '';
-    document.getElementById('mistake-list').value = '';
-    document.getElementById('main').classList.add('hidden');
-    document.getElementById('intro').classList.remove('hidden');
-    saveState();
-    updateProgress();
-  }
+  // Теперь вызывается через модал showResetModal
 
   // ====== Копирование ошибок ======
   function copyTextToClipboard(text, msg) {
@@ -334,38 +403,74 @@
     });
   }
 
-  // ====== Загрузка слов и восстановление состояния (НО НЕ ДОБАВЛЯЕМ НОВЫЕ СЕРВЕРНЫЕ СТРОКИ) ======
+  // ====== ИСПРАВЛЕННАЯ: Загрузка слов и восстановление состояния ======
   async function loadWords() {
     try {
-      const res = await fetch('words.txt');
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const txt = await res.text();
+      const txt = await robustFetchWords();
       const serverLines = txt.split(/\r?\n/).map(s => s.trim()).filter(s => s);
-      words = serverLines.map(l => parseLine(l));
+      const serverWords = serverLines.map(l => parseLine(l));
 
-      // load saved state if exists, but DO NOT auto-append new server lines to orderRaw
-      const saved = loadState();
-      if (saved && Array.isArray(saved.orderRaw) && saved.orderRaw.length) {
-        orderRaw = saved.orderRaw.filter(r => serverLines.includes(r));
-        // не добавляем новые строки с сервера автоматически
-        mistakes = Array.isArray(saved.mistakes) ? saved.mistakes.filter(r => serverLines.includes(r)) : [];
-        correctLines = Array.isArray(saved.correctLines) ? saved.correctLines.filter(r => serverLines.includes(r)) : [];
-        currentRaw = saved.currentRaw && serverLines.includes(saved.currentRaw) ? saved.currentRaw : null;
-        mode = saved.mode || 'all';
-        document.getElementById('mistake-list').value = mistakes.join('\n');
-        document.getElementById('correct-list').value = correctLines.join('\n');
-        // show intro, let user click "Я сделал дуа" to resume
-        document.getElementById('intro').classList.remove('hidden');
-        document.getElementById('main').classList.add('hidden');
-        updateProgress();
-        return;
+      // load saved state if exists
+      const st = loadState();
+      
+      if (st && Array.isArray(st.wordsList) && st.wordsList.length) {
+        // Восстанавливаем words из сохраненных rawLine
+        words = st.wordsList.map(raw => {
+          const parsed = parseLine(raw);
+          return { rawLine: raw, ...parsed };
+        });
+        
+        // Мапы для поиска
+        const serverRawSet = new Set(serverLines);
+        
+        // 1. Удаленные слова - убираем из words и всех списков
+        words = words.filter(w => serverRawSet.has(w.rawLine));
+        
+        orderRaw = (Array.isArray(st.orderRaw) ? st.orderRaw.filter(r => serverRawSet.has(r)) : []);
+        mistakes = (Array.isArray(st.mistakes) ? st.mistakes.filter(r => serverRawSet.has(r)) : []);
+        correctLines = (Array.isArray(st.correctLines) ? st.correctLines.filter(r => serverRawSet.has(r)) : []);
+        currentRaw = (st.currentRaw && serverRawSet.has(st.currentRaw)) ? st.currentRaw : null;
+        mode = st.mode || 'all';
+        
+        // 2. Измененные слова - обновляем в words и сбрасываем прогресс
+        const serverByRaw = new Map(serverWords.map(w => [w.rawLine, w]));
+        const changedWords = [];
+        
+        words.forEach((existingWord, index) => {
+          const serverWord = serverByRaw.get(existingWord.rawLine);
+          if (serverWord && getWordContentHash(existingWord) !== getWordContentHash(serverWord)) {
+            // Обновляем
+            words[index] = serverWord;
+            changedWords.push(serverWord.rawLine);
+          }
+        });
+        
+        // Сбрасываем прогресс для измененных: убираем из correct/mistakes, добавляем в начало orderRaw
+        changedWords.forEach(rawLine => {
+          correctLines = correctLines.filter(r => r !== rawLine);
+          mistakes = mistakes.filter(r => r !== rawLine);
+          if (!orderRaw.includes(rawLine)) {
+            orderRaw.unshift(rawLine); // В начало очереди
+          }
+        });
+        
+        // НЕ добавляем новые слова автоматически
+        
+      } else {
+        // Fresh init - добавляем все слова с сервера
+        words = serverWords.slice();
+        prepareOrder('all');
       }
-
-      // no saved state -> initialize fresh and show intro (this happens e.g. after full reset)
-      prepareOrder('all');
+      
+      document.getElementById('mistake-list').value = mistakes.join('\n');
+      document.getElementById('correct-list').value = correctLines.join('\n');
+      
+      // Показываем intro, пользователь кликнет "Я сделал дуа"
       document.getElementById('intro').classList.remove('hidden');
       document.getElementById('main').classList.add('hidden');
       updateProgress();
+      saveState();
+      
     } catch (err) {
       document.getElementById('arabicWord').textContent = 'Не удалось загрузить words.txt: ' + err;
       console.error(err);
@@ -400,7 +505,7 @@
     nextWord();
   });
   document.getElementById('addNewBtn').addEventListener('click', addNewWords);
-  document.getElementById('resetBtn').addEventListener('click', resetProgress);
+  document.getElementById('resetBtn').addEventListener('click', showResetModal);
   window.addEventListener('beforeunload', saveState);
 
   // старт загрузки
